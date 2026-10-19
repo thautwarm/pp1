@@ -98,8 +98,8 @@ pp1-setup <command>          # or: deno run -A scripts/onboard.ts <command>
 ```
 
 Useful flags: `--hf-endpoint https://hf-mirror.com` (or set `HF_ENDPOINT`),
-`--source modelscope` for the ASR weights, `--chat-base-url …` to use your own
-chat model instead of the bundled one, `--daemons N` to change TTS parallelism.
+`--source modelscope` for the ASR weights, `--chat-base-url …` / `--no-chat` /
+`--local-chat` to pick the chat endpoint, `--daemons N` to change TTS parallelism.
 
 Prebuilt `pp1-setup-{linux,darwin,windows}-{x64,arm64}` binaries are attached to
 [releases](https://github.com/thautwarm/pp1/releases). They are self-contained —
@@ -140,6 +140,10 @@ pp1-setup env --chat-base-url https://api.example.com/v1 \
               --chat-api-key sk-... --chat-model some-model
 pp1-setup up
 ```
+
+`--local-chat` switches back to the bundled model. The brain requires a non-empty
+key even when the endpoint has no auth; `onboard` writes the placeholder `none`
+in that case.
 
 ## Troubleshooting
 
