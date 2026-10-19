@@ -605,6 +605,11 @@ function parseArgs(argv: string[]): Opts {
       o.chat.mode = "external";
       continue;
     }
+    if (arg === "--local-chat") {
+      o.chat.mode = "local";
+      o.chat.baseUrl = undefined;
+      continue;
+    }
     if (arg === "--force") {
       o.force = true;
       continue;
@@ -663,6 +668,7 @@ const HELP = `pp1 ${VERSION} — all-in-one voice-assistant stack
   --chat-api-key <key>    外部 chat 的 key
   --chat-model <name>     外部 chat 的模型名
   --no-chat               不部署本地 chat（必须给 --chat-base-url）
+  --local-chat            使用内置 chat（默认；从外部端点切回来时用）
   --hf-endpoint <url>     HuggingFace 镜像（如 https://hf-mirror.com）
   --source <auto|hf|modelscope>   ASR 模型来源（默认 auto：先 ModelScope）
   --jobs <n>              TTS 编译并行度
@@ -810,6 +816,7 @@ async function cmdEnv(o: Opts, d: Diag): Promise<void> {
   let chatMode: "local" | "external";
   if (externalUrl) chatMode = "external";
   else if (o.chat.mode === "external") chatMode = "external";
+  else if (o.chat.mode === "local") chatMode = "local";
   else if (isLocalChatUrl(existingUrl)) chatMode = "local";
   else chatMode = "external";
 
@@ -825,10 +832,10 @@ async function cmdEnv(o: Opts, d: Diag): Promise<void> {
   const chatBase = chatMode === "local" ? "http://chat:8080/v1" : externalBase;
   const chatKey = chatMode === "local"
     ? "local"
-    : o.chat.apiKey ?? pick("MIGHT_CHAT_API_KEY", "");
+    : (o.chat.apiKey || pick("MIGHT_CHAT_API_KEY", "") || "none");
   const chatModel = o.chat.model ?? pick("MIGHT_CHAT_MODEL", "qwen3");
-  if (chatMode === "external" && !chatKey) {
-    warn("外部 chat 端点没有 key；如果它不需要鉴权可以忽略");
+  if (chatMode === "external" && !o.chat.apiKey && !pick("MIGHT_CHAT_API_KEY", "")) {
+    warn("外部 chat 没有 key：已写入占位值 `none`（brain 要求非空；不鉴权的服务随便给）");
   }
 
   const uid = Deno.build.os === "windows" ? "1000" : String(Deno.uid() ?? 1000);

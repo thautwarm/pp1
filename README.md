@@ -42,14 +42,19 @@ in parallel. `onboard` picks a count from the VRAM it finds.
 git clone https://github.com/thautwarm/pp1
 cd pp1
 
-# 1. check the machine, download weights, build images, write .env
-./pp1-setup-linux-x64 all
-#    (no prebuilt binary? use: deno run -A scripts/onboard.ts all)
+# 1. grab the setup binary for your platform (or skip it and use Deno below)
+curl -L -o pp1-setup-linux-x64 \
+  https://github.com/thautwarm/pp1/releases/download/v0.1.0/pp1-setup-linux-x64
+chmod +x pp1-setup-linux-x64
+#    no binary? deno run -A scripts/onboard.ts all
 
-# 2. start STT + TTS + brain (+ the optional chat model)
+# 2. check the machine, download weights, build images, write .env
+./pp1-setup-linux-x64 all
+
+# 3. start STT + TTS + brain (+ the optional chat model)
 docker compose up -d
 
-# 3. verify end to end
+# 4. verify end to end
 ./pp1-setup-linux-x64 smoke
 ```
 
