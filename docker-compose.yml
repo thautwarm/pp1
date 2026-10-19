@@ -1,0 +1,147 @@
+# pp1 — all-in-one personal voice-assistant backend.
+#
+#   speech-to-text  (Qwen3-ASR-1.7B, port 8082)
+#   text-to-speech  (moss-tts-windowed / MOSS-TTS 8B, port 6677)
+#   brain server    (pp-brain-server, port 8787)  ← the app talks to this one
+#   chat model      (llama.cpp + a small GGUF, port 8088)  ← optional, for revision
+#
+# Run `pp1 onboard all` (or `deno run -A scripts/onboard.ts all`) once: it
+# downloads weights, fetches the component sources, builds the images and
+# writes `.env`. Then: `docker compose up -d`.
+
+name: pp1
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  asr:
+    build:
+      context: ./docker/asr
+    image: ${PP1_ASR_IMAGE:-pp1/asr:latest}
+    container_name: pp1-asr
+    restart: unless-stopped
+    ports:
+      - "${PP1_STT_PORT:-8082}:8082"
+    volumes:
+      - ./models/asr:/models:ro
+    environment:
+      ASR_MODEL: /models/Qwen3-ASR-1.7B
+    <<: *gpu
+    healthcheck:
+      # the pytorch base image has no curl; use its own python
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8082/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  tts:
+    build:
+      context: ./.components/moss-tts-windowed
+      dockerfile: docker/Dockerfile
+    image: ${PP1_TTS_IMAGE:-pp1/tts:latest}
+    container_name: pp1-tts
+    restart: unless-stopped
+    init: true
+    # run as the host user so voices/, run/ and logs/ keep sane ownership
+    user: "${MOSS_UID:-1000}:${MOSS_GID:-1000}"
+    ports:
+      - "${PP1_TTS_PORT:-6677}:8080"
+    volumes:
+      - ${MOSS_MODELS_HOST:-./models/tts}:/models:ro
+      - ./voices:/voices
+      - ./run:/run/moss
+      - ./logs/tts:/var/log/moss
+    env_file:
+      - .env
+    environment:
+      MOSS_MODELS_DIR: /models
+      MOSS_VOICES_DIR: /voices
+      MOSS_DAEMON_SOCK: /run/moss/serve.sock
+      NVIDIA_VISIBLE_DEVICES: "0"
+    <<: *gpu
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # Optional local chat endpoint. The brain needs one for its background
+  # "was the transcription right?" pass; any OpenAI-compatible endpoint works
+  # (pass --chat-base-url to onboard to use yours instead of this service).
+  chat:
+    profiles: ["local-chat"]
+    image: ${PP1_CHAT_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    container_name: pp1-chat
+    restart: unless-stopped
+    ports:
+      - "${PP1_CHAT_PORT:-8088}:8080"
+    volumes:
+      - ./models/chat:/models:ro
+    command:
+      - "-m"
+      - "/models/${PP1_CHAT_GGUF:-Qwen3-1.7B-Q4_K_M.gguf}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "-c"
+      - "8192"
+      - "-ngl"
+      - "99"
+      - "--jinja"
+      # Qwen3 is a hybrid reasoning model; the revision pass does not need
+      # thoughts, and with a small token budget they would swallow the answer.
+      - "--reasoning-budget"
+      - "0"
+      # the revision pass is a background task; thinking only burns the budget
+      - "--reasoning"
+      - "off"
+    <<: *gpu
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  brains:
+    build:
+      context: ./.components/pp-brain-server
+      dockerfile: Dockerfile.brains
+    image: ${PP1_BRAIN_IMAGE:-pp1/brain:latest}
+    container_name: pp1-brains
+    restart: unless-stopped
+    ports:
+      - "${PP1_BRAIN_PORT:-8787}:8787"
+    env_file:
+      - .env
+    environment:
+      MIGHT_BRAINS_PORT: "8787"
+    volumes:
+      - ./logs/brains:/app/logs
+    depends_on:
+      - asr
+      - tts
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

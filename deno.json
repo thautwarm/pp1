@@ -1,0 +1,19 @@
+{
+  "name": "pp1",
+  "version": "0.1.0",
+  "exports": {},
+  "tasks": {
+    "onboard": "deno run -A scripts/onboard.ts",
+    "doctor": "deno run -A scripts/onboard.ts doctor",
+    "check": "deno check scripts/onboard.ts",
+    "release": "bash scripts/release.sh"
+  },
+  "fmt": {
+    "lineWidth": 100
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"]
+    }
+  }
+}
