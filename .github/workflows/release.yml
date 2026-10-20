@@ -19,8 +19,8 @@ jobs:
           deno-version: v2.x
       - name: Type check
         run: deno check scripts/onboard.ts
-      - name: Compile
-        run: bash scripts/release.sh
+      - name: Build setup binaries (nomake)
+        run: deno run -A build.ts build
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:

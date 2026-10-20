@@ -181,12 +181,25 @@ subsequent requests are first-byte ≈ 0.6 s.
 **No NVIDIA GPU** — the stack targets CUDA. macOS builds of `pp1-setup` can fetch
 and configure, but TTS/ASR need a Linux GPU host.
 
+## Development
+
+```sh
+deno task check             # type-check scripts/onboard.ts
+deno run -A build.ts build  # cross-compile dist/pp1-setup-{os}-{arch}
+```
+
+The release build is a [nomake](https://github.com/thautwarm/nomake) makefile:
+`build.ts` imports nomake by URL and defines one `deno compile` target per
+platform, so no nomake installation is needed (`nomake build` runs the same file).
+`scripts/release.sh` remains as a dependency-free fallback.
+
 ## Layout
 
 ```
-docker-compose.yml        four services, one network
+docker-compose.yml        three services, one network
 docker/asr/               Qwen3-ASR server (OpenAI-compatible)
 scripts/onboard.ts        the setup tool (Deno, single file)
+build.ts                  nomake makefile: pp1-setup-* binaries
 voices/                   demo voice + your references
 models/                   downloaded weights (gitignored)
 .components/              pinned checkouts of tts / brain (gitignored)
@@ -201,6 +214,6 @@ internet. `MIGHT_BRAINS_TOKEN` adds a bearer check to all four endpoints.
 ## Licenses
 
 pp1 itself is MIT. The container images and weights carry their own licenses:
-Qwen3-ASR and Qwen3-1.7B are Apache-2.0; MOSS-TTS weights and
+Qwen3-ASR is Apache-2.0; MOSS-TTS weights and
 moss-tts-windowed are covered by their upstream repositories — check them before
 commercial use.
