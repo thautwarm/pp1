@@ -137,10 +137,17 @@ likely to touch:
 
 ### Chat endpoint (required)
 
-The brain's revision pass takes the most recent audio clips and sends them to the
-chat model as OpenAI `input_audio` parts (base64 Ogg/Opus), asking "is this
-transcription right?". That means the endpoint **must natively accept audio
-input** — a text-only model receives the request but rejects the audio part.
+The brain runs an **asynchronous ASR revision** in the background: every three
+history writes it sends the most recent audio clips (up to 7) together with their
+transcripts to the chat model. If the model thinks a transcript may have misled
+the agent, it calls the `notify(warning)` tool; the brain wraps the result in
+`<asr-warning>…</asr-warning>` and puts it on the agent queue, where the agent
+picks it up via `/brain-to-agent` and can correct its later work. Nothing is
+spoken to the user, and the phone never sees the warning.
+
+Because the model compares the audio with what was transcribed, the endpoint
+**must natively accept audio input** (`input_audio` parts, base64 Ogg/Opus) — a
+text-only model receives the request but rejects the audio part.
 
 `pp1` deliberately does not bundle one; point it at whatever you already run:
 
