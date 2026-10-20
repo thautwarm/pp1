@@ -3,7 +3,9 @@
 #   speech-to-text  (Qwen3-ASR-1.7B, port 8082)
 #   text-to-speech  (moss-tts-windowed / MOSS-TTS 8B, port 6677)
 #   brain server    (pp-brain-server, port 8787)  ← the app talks to this one
-#   chat model      (llama.cpp + a small GGUF, port 8088)  ← optional, for revision
+#
+# The brain's background revision uses an external, audio-capable chat endpoint
+# (MIGHT_CHAT_API_* in .env). pp1 does not run one.
 #
 # Run `pp1 onboard all` (or `deno run -A scripts/onboard.ts all`) once: it
 # downloads weights, fetches the component sources, builds the images and
@@ -82,44 +84,6 @@ services:
       driver: json-file
       options:
         max-size: "20m"
-        max-file: "3"
-
-  # Optional local chat endpoint. The brain needs one for its background
-  # "was the transcription right?" pass; any OpenAI-compatible endpoint works
-  # (pass --chat-base-url to onboard to use yours instead of this service).
-  chat:
-    profiles: ["local-chat"]
-    image: ${PP1_CHAT_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
-    container_name: pp1-chat
-    restart: unless-stopped
-    ports:
-      - "${PP1_CHAT_PORT:-8088}:8080"
-    volumes:
-      - ./models/chat:/models:ro
-    command:
-      - "-m"
-      - "/models/${PP1_CHAT_GGUF:-Qwen3-1.7B-Q4_K_M.gguf}"
-      - "--host"
-      - "0.0.0.0"
-      - "--port"
-      - "8080"
-      - "-c"
-      - "8192"
-      - "-ngl"
-      - "99"
-      - "--jinja"
-      # Qwen3 is a hybrid reasoning model; the revision pass does not need
-      # thoughts, and with a small token budget they would swallow the answer.
-      - "--reasoning-budget"
-      - "0"
-      # the revision pass is a background task; thinking only burns the budget
-      - "--reasoning"
-      - "off"
-    <<: *gpu
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
         max-file: "3"
 
   brains:

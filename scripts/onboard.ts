@@ -56,13 +56,6 @@ const TTS_MODELS = [
 const ASR_REPO = "Qwen/Qwen3-ASR-1.7B";
 const ASR_DIR = "Qwen3-ASR-1.7B";
 
-const CHAT_REPO = "unsloth/Qwen3-1.7B-GGUF";
-const CHAT_FILE = "Qwen3-1.7B-Q4_K_M.gguf";
-const CHAT_SIZE = 1107409472;
-const CHAT_SHA = "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897";
-
-const CHAT_IMAGE = "ghcr.io/ggml-org/llama.cpp:server-cuda";
-
 // ── small utilities ───────────────────────────────────────────────────────────
 const tty = Deno.stdout.isTerminal();
 const enc = new TextEncoder();
@@ -206,10 +199,10 @@ async function detectGpu(): Promise<Gpu> {
   }
 }
 
-/** How many resident TTS daemons fit next to ASR + chat. */
+/** How many resident TTS daemons fit next to the ASR model. */
 function daemonsFor(memMiB?: number): number {
   if (!memMiB) return 1;
-  const usable = memMiB - 9000; // ASR (~5 GB), chat (~2.5 GB), CUDA contexts
+  const usable = memMiB - 7000; // ASR (~5 GB), CUDA contexts, driver
   return Math.max(1, Math.min(3, Math.floor(usable / 7000)));
 }
 
@@ -469,7 +462,11 @@ async function readEnvFile(path: string): Promise<Map<string, string>> {
   return map;
 }
 
-async function writeEnvFile(path: string, values: Record<string, string>): Promise<void> {
+async function writeEnvFile(
+  path: string,
+  values: Record<string, string>,
+  remove: string[] = [],
+): Promise<void> {
   let text = "";
   try {
     text = await Deno.readTextFile(path);
@@ -481,6 +478,7 @@ async function writeEnvFile(path: string, values: Record<string, string>): Promi
   const out: string[] = [];
   for (const line of text.split(/\r?\n/)) {
     const m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(line);
+    if (m && remove.includes(m[1])) continue;
     if (m && values[m[1]] !== undefined) {
       if (!seen.has(m[1])) {
         out.push(`${m[1]}=${values[m[1]]}`);
@@ -512,9 +510,9 @@ interface Opts {
   command: string;
   root: string;
   dir?: string;
-  ports: { tts?: number; stt?: number; brain?: number; chat?: number };
+  ports: { tts?: number; stt?: number; brain?: number };
   daemons?: number;
-  chat: { mode?: "local" | "external"; baseUrl?: string; apiKey?: string; model?: string };
+  chat: { baseUrl?: string; apiKey?: string; model?: string };
   hfEndpoint?: string;
   source: "auto" | "hf" | "modelscope";
   jobs?: number;
@@ -540,7 +538,6 @@ function parseArgs(argv: string[]): Opts {
     "--tts-port",
     "--stt-port",
     "--brain-port",
-    "--chat-port",
     "--daemons",
     "--chat-base-url",
     "--chat-api-key",
@@ -564,14 +561,10 @@ function parseArgs(argv: string[]): Opts {
       case "--brain-port":
         o.ports.brain = Number(value);
         break;
-      case "--chat-port":
-        o.ports.chat = Number(value);
-        break;
       case "--daemons":
         o.daemons = Number(value);
         break;
       case "--chat-base-url":
-        o.chat.mode = "external";
         o.chat.baseUrl = value;
         break;
       case "--chat-api-key":
@@ -599,15 +592,6 @@ function parseArgs(argv: string[]): Opts {
     const arg = argv[i];
     if (arg === "-h" || arg === "--help") {
       o.command = "help";
-      continue;
-    }
-    if (arg === "--no-chat") {
-      o.chat.mode = "external";
-      continue;
-    }
-    if (arg === "--local-chat") {
-      o.chat.mode = "local";
-      o.chat.baseUrl = undefined;
       continue;
     }
     if (arg === "--force") {
@@ -662,13 +646,10 @@ const HELP = `pp1 ${VERSION} — all-in-one voice-assistant stack
   --tts-port <n>          TTS 对外端口（默认 6677）
   --stt-port <n>          ASR 对外端口（默认 8082）
   --brain-port <n>        brain 对外端口（默认 8787）
-  --chat-port <n>         本地 chat 端口（默认 8088）
   --daemons <n>           TTS 常驻 daemon 数（默认按显存算）
-  --chat-base-url <url>   用外部 OpenAI 兼容端点代替本地 chat
-  --chat-api-key <key>    外部 chat 的 key
-  --chat-model <name>     外部 chat 的模型名
-  --no-chat               不部署本地 chat（必须给 --chat-base-url）
-  --local-chat            使用内置 chat（默认；从外部端点切回来时用）
+  --chat-base-url <url>   brain 的 chat 端点（必填，须原生支持音频输入）
+  --chat-api-key <key>    chat 端点的 key（无鉴权就随便填，默认 none）
+  --chat-model <name>     chat 模型名（不填则沿用 .env / brain 默认）
   --hf-endpoint <url>     HuggingFace 镜像（如 https://hf-mirror.com）
   --source <auto|hf|modelscope>   ASR 模型来源（默认 auto：先 ModelScope）
   --jobs <n>              TTS 编译并行度
@@ -791,16 +772,6 @@ async function cmdFetch(o: Opts): Promise<void> {
   step("ASR 权重（~4.7 GB）");
   await downloadSnapshot(ASR_REPO, join(o.root, "models/asr", ASR_DIR), o);
 
-  if (o.chat.mode !== "external") {
-    step("chat 权重（~1.1 GB）");
-    await downloadFile(
-      `${hf}/${CHAT_REPO}/resolve/main/${CHAT_FILE}`,
-      join(o.root, "models/chat", CHAT_FILE),
-      CHAT_SHA,
-      CHAT_SIZE,
-      o.force,
-    );
-  }
 }
 
 async function cmdEnv(o: Opts, d: Diag): Promise<void> {
@@ -809,33 +780,26 @@ async function cmdEnv(o: Opts, d: Diag): Promise<void> {
   const existing = await readEnvFile(path);
   const pick = (key: string, fallback: string) => existing.get(key) ?? fallback;
 
-  // Chat endpoint: external if asked for one, otherwise a local llama.cpp.
-  const externalUrl = o.chat.baseUrl ?? "";
-  const existingUrl = existing.get("MIGHT_CHAT_API_BASE_URL") ?? "";
-  const isLocalChatUrl = (url: string) => url === "" || url.startsWith("http://chat:");
-  let chatMode: "local" | "external";
-  if (externalUrl) chatMode = "external";
-  else if (o.chat.mode === "external") chatMode = "external";
-  else if (o.chat.mode === "local") chatMode = "local";
-  else if (isLocalChatUrl(existingUrl)) chatMode = "local";
-  else chatMode = "external";
-
-  const externalBase = externalUrl || (isLocalChatUrl(existingUrl) ? "" : existingUrl);
-  if (chatMode === "external" && !externalBase) {
+  // The brain's revision pass sends recent audio as `input_audio` parts, so its
+  // chat endpoint must natively accept audio. pp1 does not bundle one: which
+  // model/API to use is a deployment decision (the brain itself is model-agnostic).
+  const chatBase = o.chat.baseUrl || existing.get("MIGHT_CHAT_API_BASE_URL") || "";
+  if (!chatBase || chatBase.startsWith("http://chat:")) {
     die(
-      "brain 需要一个 OpenAI 兼容的 chat 端点：\n" +
-        "  要么去掉 --no-chat 使用内置的小模型，\n" +
-        "  要么给 --chat-base-url（和 --chat-api-key）。",
+      "缺少 chat 端点。brain 的 revise 会把最近几条音频以 input_audio 发给它，\n" +
+        "所以必须是一个原生支持音频输入的 OpenAI 兼容端点（纯文本模型不行）。\n" +
+        "\n" +
+        "  例：pp1-setup env --chat-base-url https://api.example.com/v1 \\\n" +
+        "        --chat-api-key sk-... --chat-model qwen-omni\n" +
+        "\n" +
+        "  可用的部署：Qwen2.5-Omni / Voxtral / Gemini / GPT-4o-audio 等，\n" +
+        "  或你自己的 vLLM/SGLang 音频模型端点。",
     );
   }
-
-  const chatBase = chatMode === "local" ? "http://chat:8080/v1" : externalBase;
-  const chatKey = chatMode === "local"
-    ? "local"
-    : (o.chat.apiKey || pick("MIGHT_CHAT_API_KEY", "") || "none");
-  const chatModel = o.chat.model ?? pick("MIGHT_CHAT_MODEL", "qwen3");
-  if (chatMode === "external" && !o.chat.apiKey && !pick("MIGHT_CHAT_API_KEY", "")) {
-    warn("外部 chat 没有 key：已写入占位值 `none`（brain 要求非空；不鉴权的服务随便给）");
+  const chatKey = o.chat.apiKey || pick("MIGHT_CHAT_API_KEY", "") || "none";
+  const chatModel = o.chat.model ?? existing.get("MIGHT_CHAT_MODEL");
+  if (!o.chat.apiKey && !pick("MIGHT_CHAT_API_KEY", "")) {
+    warn("chat 端点没有 key：已写入占位值 `none`（brain 要求非空；不鉴权的服务随便给）");
   }
 
   const uid = Deno.build.os === "windows" ? "1000" : String(Deno.uid() ?? 1000);
@@ -850,14 +814,11 @@ async function cmdEnv(o: Opts, d: Diag): Promise<void> {
     "PP1_TTS_PORT": String(o.ports.tts ?? pick("PP1_TTS_PORT", "6677")),
     "PP1_STT_PORT": String(o.ports.stt ?? pick("PP1_STT_PORT", "8082")),
     "PP1_BRAIN_PORT": String(o.ports.brain ?? pick("PP1_BRAIN_PORT", "8787")),
-    "PP1_CHAT_PORT": String(o.ports.chat ?? pick("PP1_CHAT_PORT", "8088")),
 
     // images
     "PP1_TTS_IMAGE": pick("PP1_TTS_IMAGE", "pp1/tts:latest"),
     "PP1_ASR_IMAGE": pick("PP1_ASR_IMAGE", "pp1/asr:latest"),
     "PP1_BRAIN_IMAGE": pick("PP1_BRAIN_IMAGE", "pp1/brain:latest"),
-    "PP1_CHAT_IMAGE": pick("PP1_CHAT_IMAGE", CHAT_IMAGE),
-    "PP1_CHAT_GGUF": pick("PP1_CHAT_GGUF", CHAT_FILE),
 
     // TTS (moss-tts-windowed) — tuning knobs keep whatever is already in .env
     "MOSS_UID": uid,
@@ -896,17 +857,21 @@ async function cmdEnv(o: Opts, d: Diag): Promise<void> {
     // brain
     "MIGHT_CHAT_API_BASE_URL": chatBase,
     "MIGHT_CHAT_API_KEY": chatKey,
-    "MIGHT_CHAT_MODEL": chatModel,
+    ...(chatModel ? { "MIGHT_CHAT_MODEL": chatModel } : {}),
     "MIGHT_BRAINS_TOKEN": pick("MIGHT_BRAINS_TOKEN", ""),
     "MIGHT_BRAINS_PORT": "8787",
     "MIGHT_BRAINS_POLL_TIMEOUT_MS": pick("MIGHT_BRAINS_POLL_TIMEOUT_MS", "25000"),
-
-    // compose profile (local chat service)
-    "COMPOSE_PROFILES": chatMode === "local" ? "local-chat" : "",
   };
 
-  await writeEnvFile(path, values);
-  ok(`.env（chat ${chatMode === "local" ? "内置" : "外部"}，daemons ${daemons}）`);
+  await writeEnvFile(path, values, [
+    // keys from the old "bundled chat model" layout
+    "COMPOSE_PROFILES",
+    "PP1_CHAT_PORT",
+    "PP1_CHAT_IMAGE",
+    "PP1_CHAT_GGUF",
+    "PP1_CHAT_BRIDGE_IMAGE",
+  ]);
+  ok(`.env（daemons ${daemons}）`);
 
   // Bind mounts must exist and be owned by the invoking user: the TTS container
   // runs as MOSS_UID/GID and writes its unix socket and logs there.
@@ -943,13 +908,6 @@ async function cmdBuild(o: Opts, d: Diag): Promise<void> {
   if (o.skipBuild) {
     warn("--skip-build：跳过镜像构建");
     return;
-  }
-
-  const env = await readEnvFile(join(o.root, ".env"));
-  const localChat = (env.get("COMPOSE_PROFILES") ?? "").includes("local-chat");
-  if (localChat || (env.size === 0 && o.chat.mode !== "external")) {
-    step("第三方镜像");
-    await run(["docker", "pull", CHAT_IMAGE], { stream: true });
   }
 
   step("ASR 镜像（首次 ~10 分钟）");
@@ -1028,16 +986,11 @@ async function cmdSmoke(o: Opts): Promise<void> {
   const ttsPort = Number(env.get("PP1_TTS_PORT") ?? 6677);
   const sttPort = Number(env.get("PP1_STT_PORT") ?? 8082);
   const brainPort = Number(env.get("PP1_BRAIN_PORT") ?? 8787);
-  const chatPort = Number(env.get("PP1_CHAT_PORT") ?? 8088);
   const voice = env.get("TTS_VOICE") || "male-fun";
-  const profiles = env.get("COMPOSE_PROFILES") ?? "";
 
   await waitHttp("TTS", `http://127.0.0.1:${ttsPort}/health`, 180_000);
   await waitHttp("ASR", `http://127.0.0.1:${sttPort}/health`, 180_000);
   await waitHttp("brain", `http://127.0.0.1:${brainPort}/`, 60_000);
-  if (profiles.includes("local-chat")) {
-    await waitHttp("chat", `http://127.0.0.1:${chatPort}/health`, 180_000);
-  }
 
   // 1. TTS: synthesize a short sentence, expect an Ogg/Opus stream.
   const t0 = Date.now();
@@ -1087,23 +1040,6 @@ async function cmdSmoke(o: Opts): Promise<void> {
   });
   if (!brain.ok) throw new Error(`brain ${brain.status}: ${await brain.text()}`);
   ok(`brain /agent-to-brain → ${(await brain.text()).trim()}`);
-
-  // 4. local chat, if this deployment runs it.
-  if (profiles.includes("local-chat")) {
-    const chat = await fetch(`http://127.0.0.1:${chatPort}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: "local",
-        messages: [{ role: "user", content: "Reply with the single word: ok" }],
-        max_tokens: 8,
-      }),
-      signal: AbortSignal.timeout(120_000),
-    });
-    if (!chat.ok) throw new Error(`chat ${chat.status}: ${await chat.text()}`);
-    const j = await chat.json();
-    ok(`chat → ${j.choices?.[0]?.message?.content?.trim() ?? "(empty)"}`);
-  }
 
   console.log(`\n${paint.green("全部通过")}`);
 }

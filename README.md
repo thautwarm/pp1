@@ -10,7 +10,7 @@ and started with a single compose file.
    └──────────────────────────────────▶│  :8787                       │
                                        │   ├─ STT ─▶ asr   :8082      │
                                        │   ├─ TTS ─▶ tts   :6677      │
-                                       │   └─ revise ▶ chat :8088     │
+                                       │   └─ revise ▶ chat (external) │
                                        └──────────────────────────────┘
 ```
 
@@ -19,7 +19,10 @@ and started with a single compose file.
 | **asr** | [Qwen3-ASR-1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B), OpenAI-compatible `/v1/audio/transcriptions` | ~5 GB |
 | **tts** | [moss-tts-windowed](https://github.com/thautwarm/moss-tts-windowed) — MOSS-TTS 8B, resident, streaming Ogg/Opus | ~6.8 GB per daemon |
 | **brains** | [pp-brain-server](https://github.com/thautwarm/pp-brain-server) — the Brain API the app talks to | — |
-| **chat** *(optional)* | llama.cpp + Qwen3-1.7B Q4, used only for the brain's background "was the transcription right?" pass | ~2 GB |
+
+The brain also needs a **chat endpoint** for its background revision pass. That is
+deployment configuration, not part of pp1: the endpoint must natively accept audio
+input (see [Chat endpoint](#chat-endpoint-required)).
 
 ---
 
@@ -27,7 +30,7 @@ and started with a single compose file.
 
 | | |
 | --- | --- |
-| GPU | NVIDIA, ≥ 16 GB for the full stack (STT + TTS + chat) |
+| GPU | NVIDIA, ≥ 12 GB for STT + TTS (the chat endpoint can run elsewhere) |
 | Disk | ~35 GB (weights ~14 GB, images ~20 GB) |
 | Host | Linux (or WSL2). Docker + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
 | Build | `bash` is used for the TTS build (present on Linux/macOS/WSL) |
@@ -51,7 +54,7 @@ chmod +x pp1-setup-linux-x64
 # 2. check the machine, download weights, build images, write .env
 ./pp1-setup-linux-x64 all
 
-# 3. start STT + TTS + brain (+ the optional chat model)
+# 3. start STT + TTS + brain
 docker compose up -d
 
 # 4. verify end to end
@@ -76,7 +79,6 @@ agent text → speech.
 | brain | 8787 | `POST /human-to-brain`, `/brain-to-human`, `/agent-to-brain`, `/brain-to-agent` |
 | TTS | 6677 | `GET /health`, `POST /v1/audio/speech/stream` |
 | ASR | 8082 | `GET /health`, `POST /v1/audio/transcriptions` |
-| chat | 8088 | OpenAI-compatible `/v1/chat/completions` (profile `local-chat`) |
 
 Ports live in `.env` (`PP1_*_PORT`); the compose network addresses used by the
 brain are `http://asr:8082/v1` and `http://tts:8080/v1`.
@@ -94,12 +96,12 @@ pp1-setup <command>          # or: deno run -A scripts/onboard.ts <command>
   up         docker compose up -d
   down       docker compose down
   status     container state + HTTP probes
-  smoke      end-to-end: TTS, STT, brain, chat
+  smoke      end-to-end: TTS, STT, brain
 ```
 
 Useful flags: `--hf-endpoint https://hf-mirror.com` (or set `HF_ENDPOINT`),
-`--source modelscope` for the ASR weights, `--chat-base-url …` / `--no-chat` /
-`--local-chat` to pick the chat endpoint, `--daemons N` to change TTS parallelism.
+`--source modelscope` for the ASR weights, `--daemons N` to change TTS parallelism.
+`--chat-base-url` / `--chat-api-key` / `--chat-model` set the required chat endpoint.
 
 Prebuilt `pp1-setup-{linux,darwin,windows}-{x64,arm64}` binaries are attached to
 [releases](https://github.com/thautwarm/pp1/releases). They are self-contained —
@@ -129,21 +131,29 @@ likely to touch:
 | `MOSS_DAEMONS` | resident TTS workers; each ≈ 6.8 GB VRAM |
 | `MOSS_LANGUAGE` | TTS language hint (`zh`, `en`, …) |
 | `TTS_VOICE` | default voice for messages without `x-brain-voice` |
-| `MIGHT_CHAT_API_BASE_URL` / `_KEY` / `_MODEL` | external OpenAI-compatible chat endpoint |
+| `MIGHT_CHAT_API_BASE_URL` / `_KEY` / `_MODEL` | **required** audio-capable chat endpoint (see below) |
 | `MIGHT_BRAINS_TOKEN` | bearer token for the brain API; empty = auth off |
 | `MIGHT_LOG_LLM` | `1` = dump LLM requests/responses to `logs/brains/` (contains conversation text) |
 
-To use an external chat model instead of the bundled one:
+### Chat endpoint (required)
+
+The brain's revision pass takes the most recent audio clips and sends them to the
+chat model as OpenAI `input_audio` parts (base64 Ogg/Opus), asking "is this
+transcription right?". That means the endpoint **must natively accept audio
+input** — a text-only model receives the request but rejects the audio part.
+
+`pp1` deliberately does not bundle one; point it at whatever you already run:
 
 ```bash
 pp1-setup env --chat-base-url https://api.example.com/v1 \
-              --chat-api-key sk-... --chat-model some-model
+              --chat-api-key sk-... --chat-model qwen-omni
 pp1-setup up
 ```
 
-`--local-chat` switches back to the bundled model. The brain requires a non-empty
-key even when the endpoint has no auth; `onboard` writes the placeholder `none`
-in that case.
+Suitable deployments include Qwen2.5-Omni, Voxtral, Gemini and GPT-4o-audio, or
+your own vLLM/SGLang endpoint serving an audio model. The key must be non-empty
+even when the endpoint has no auth; `onboard` writes the placeholder `none` in
+that case.
 
 ## Troubleshooting
 
