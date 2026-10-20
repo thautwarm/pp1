@@ -4,6 +4,7 @@
 # downloaded components / weights
 .components/
 models/
+.stamps/
 
 # runtime state
 run/

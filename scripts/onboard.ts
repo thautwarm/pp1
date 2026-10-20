@@ -888,27 +888,21 @@ async function buildTts(o: Opts, gpu: Gpu): Promise<void> {
   }
 }
 
-async function buildImages(o: Opts, gpu: Gpu): Promise<void> {
-  if (o.skipBuild) {
-    warn("--skip-build：跳过镜像构建");
-    return;
-  }
-
+async function buildAsrImage(o: Opts): Promise<void> {
   step("ASR 镜像（首次 ~10 分钟）");
   await run(["docker", "build", "-t", "pp1/asr:latest", join(o.root, "docker/asr")], {
     stream: true,
   });
+}
 
+async function buildBrainImage(o: Opts): Promise<void> {
   step("brain 镜像");
   const brainDir = join(o.root, ".components", COMPONENTS.brain.dir);
-  if (!(await exists(brainDir))) throw new Error("缺少 brain 源码，先跑 pp1 fetch");
+  if (!(await exists(brainDir))) throw new Error("缺少 brain 源码，先跑 pp1 components");
   await run(
     ["docker", "build", "-f", "Dockerfile.brains", "-t", "pp1/brain:latest", "."],
     { cwd: brainDir, stream: true },
   );
-
-  step("TTS 镜像（首次 ~15 分钟）");
-  await buildTts(o, gpu);
 }
 
 async function cmdUp(o: Opts): Promise<void> {
@@ -1029,6 +1023,12 @@ async function cmdSmoke(o: Opts): Promise<void> {
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
+/** Record that a non-file artifact (component checkout, image) is up to date. */
+async function markStamp(path: string): Promise<void> {
+  await Deno.mkdir(dirname(path), { recursive: true });
+  await Deno.writeTextFile(path, `${new Date().toISOString()}\n`);
+}
+
 // ── nomake targets ────────────────────────────────────────────────────────────
 //
 // The setup is a dependency graph, not a sequence:
@@ -1065,32 +1065,35 @@ function defineTargets(o: Opts, gpu: Gpu): void {
     },
   });
 
+  // A stamp whose name contains the pinned refs: bumping a ref creates a new
+  // target, so the checkout is refreshed exactly when the pin changes.
+  const componentsStamp =
+    `.stamps/components-${COMPONENTS.tts.ref.slice(0, 8)}-${COMPONENTS.brain.ref.slice(0, 8)}`;
   NM.target({
-    name: "components",
-    virtual: true,
-    rebuild: "always",
+    name: componentsStamp,
+    rebuild: o.force ? "always" : "never",
     doc: "clone/update the pinned component checkouts",
     deps: ["doctor"],
     async build() {
       await fetchComponents(o);
+      await markStamp(componentsStamp);
     },
   });
 
-  // Virtual targets: nomake deletes real file targets before rebuilding them,
-  // which would re-download every model on every run. The build functions below
-  // already verify existing files and skip them.
-  const ttsTargets = TTS_MODELS.map((m, i) => `model-tts-${i}`);
-  TTS_MODELS.forEach((m, i) => {
+  // Downloads are real file targets: `never` means "build only when missing",
+  // which is exactly the cache we want. `--force` flips them to `always`, and
+  // nomake then removes the file before rebuilding it.
+  const ttsFiles = TTS_MODELS.map((m) => `models/tts/${m.file}`);
+  TTS_MODELS.forEach((m) => {
     NM.target({
-      name: ttsTargets[i],
-      virtual: true,
-      rebuild: "always",
+      name: `models/tts/${m.file}`,
+      rebuild: o.force ? "always" : "never",
       doc: `download ${m.file}`,
       deps: ["doctor"],
-      async build() {
+      async build({ target }) {
         await downloadFile(
           `${hf}/${TTS_REPO}/resolve/main/${m.file}`,
-          join(o.root, "models/tts", m.file),
+          String(target),
           m.sha256,
           m.size,
           o.force,
@@ -1099,15 +1102,26 @@ function defineTargets(o: Opts, gpu: Gpu): void {
     });
   });
 
+  // The ASR snapshot is a directory, so it gets a stamp instead of a file target.
+  const asrStamp = ".stamps/asr-model";
   NM.target({
-    name: "asr-model",
-    virtual: true,
-    rebuild: "always",
+    name: asrStamp,
+    rebuild: o.force ? "always" : "never",
     doc: "download the Qwen3-ASR-1.7B snapshot",
     deps: ["doctor"],
     async build() {
       await downloadSnapshot(ASR_REPO, join(o.root, "models/asr", ASR_DIR), o);
+      await markStamp(asrStamp);
     },
+  });
+
+  NM.target({
+    name: "components",
+    virtual: true,
+    rebuild: "always",
+    doc: "clone/update the pinned component checkouts",
+    deps: [componentsStamp],
+    build() {},
   });
 
   NM.target({
@@ -1115,9 +1129,63 @@ function defineTargets(o: Opts, gpu: Gpu): void {
     virtual: true,
     rebuild: "always",
     doc: "all model weights",
-    deps: o.skipModels ? [] : [...ttsTargets, "asr-model"],
+    deps: o.skipModels ? [] : [...ttsFiles, asrStamp],
     build() {
       if (o.skipModels) warn("--skip-models：跳过模型下载");
+    },
+  });
+
+  // One stamp per image, keyed by the files that determine its contents.
+  const asrImage = ".stamps/image-asr";
+  NM.target({
+    name: asrImage,
+    rebuild: o.force ? "always" : "onChanged",
+    doc: "build pp1/asr",
+    deps: ["doctor", "docker/asr/Dockerfile", "docker/asr/server.py"],
+    async build() {
+      if (o.skipBuild) {
+        warn("--skip-build：跳过镜像构建");
+        return;
+      }
+      await buildAsrImage(o);
+      await markStamp(asrImage);
+    },
+  });
+
+  const brainImage = ".stamps/image-brain";
+  NM.target({
+    name: brainImage,
+    rebuild: o.force ? "always" : "onChanged",
+    doc: "build pp1/brain",
+    deps: ["components", ".components/pp-brain-server/Dockerfile.brains"],
+    async build() {
+      if (o.skipBuild) {
+        warn("--skip-build：跳过镜像构建");
+        return;
+      }
+      await buildBrainImage(o);
+      await markStamp(brainImage);
+    },
+  });
+
+  const ttsImage = ".stamps/image-tts";
+  NM.target({
+    name: ttsImage,
+    rebuild: o.force ? "always" : "onChanged",
+    doc: "build pp1/tts",
+    deps: [
+      "components",
+      "models",
+      ".components/moss-tts-windowed/docker/Dockerfile",
+      ".components/moss-tts-windowed/server.py",
+    ],
+    async build() {
+      if (o.skipBuild) {
+        warn("--skip-build：跳过镜像构建");
+        return;
+      }
+      await buildTts(o, gpu);
+      await markStamp(ttsImage);
     },
   });
 
@@ -1126,14 +1194,8 @@ function defineTargets(o: Opts, gpu: Gpu): void {
     virtual: true,
     rebuild: "always",
     doc: "build pp1/asr, pp1/brain and pp1/tts",
-    deps: ["components", "models"],
-    async build() {
-      if (o.skipBuild) {
-        warn("--skip-build：跳过镜像构建");
-        return;
-      }
-      await buildImages(o, gpu);
-    },
+    deps: [asrImage, brainImage, ttsImage],
+    build() {},
   });
 
   NM.target({
@@ -1281,7 +1343,11 @@ try {
   const opts = parseArgs(Deno.args);
   const requested = opts.targets.length > 0 ? opts.targets : ["all"];
   const needsRepo = requested.some((t) => !["usage", "version", "help"].includes(t));
-  if (needsRepo) opts.root = await resolveRoot(opts.dir ?? Deno.cwd());
+  if (needsRepo) {
+    opts.root = await resolveRoot(opts.dir ?? Deno.cwd());
+    // nomake resolves target paths against the process cwd
+    Deno.chdir(opts.root);
+  }
   const gpu = await detectGpu();
   defineTargets(opts, gpu);
   await NM.makefile(requested);
